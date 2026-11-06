@@ -77,8 +77,12 @@ typedef NS_ENUM(NSInteger, WCAIMsgType) {
 @property (nonatomic, assign) NSTimeInterval bootTime;
 @property (nonatomic, assign) NSInteger hookHit, hookMiss;
 @property (nonatomic, assign) BOOL hooked;
+// 自检诊断（注入后用于定位 hook 点是否命中，非越狱环境看不到 NSLog）
+@property (nonatomic, strong) NSMutableArray<NSString *> *diag;
 + (instancetype)shared;
 - (BOOL)withinSyncWindow;                                // 启动 60s 内 = YES
+- (void)diagAdd:(NSString *)fmt, ... NS_FORMAT_FUNCTION(1,2);
+- (NSString *)diagText;                                  // 汇总文本，供一键复制
 @end
 
 // wxid 去重（LRU，容量 512）

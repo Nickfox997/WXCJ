@@ -15,11 +15,39 @@
 @implementation WCAIRuntime
 + (instancetype)shared {
     static WCAIRuntime *s; static dispatch_once_t once;
-    dispatch_once(&once, ^{ s = [WCAIRuntime new]; s.bootTime = [NSDate timeIntervalSinceReferenceDate]; });
+    dispatch_once(&once, ^{
+        s = [WCAIRuntime new];
+        s.bootTime = [NSDate timeIntervalSinceReferenceDate];
+        s.diag = [NSMutableArray array];
+    });
     return s;
 }
 - (BOOL)withinSyncWindow {
     return ([NSDate timeIntervalSinceReferenceDate] - self.bootTime) < 60.0;
+}
+- (void)diagAdd:(NSString *)fmt, ... {
+    va_list ap; va_start(ap, fmt);
+    NSString *line = [[NSString alloc] initWithFormat:fmt arguments:ap];
+    va_end(ap);
+    if (!line) return;
+    @synchronized (self) {
+        if (!self.diag) self.diag = [NSMutableArray array];
+        [self.diag addObject:line];
+        while (self.diag.count > 80) [self.diag removeObjectAtIndex:0];
+    }
+}
+- (NSString *)diagText {
+    NSMutableString *m = [NSMutableString string];
+    [m appendFormat:@"插件 %@\n", WCAI_VERSION_STR];
+    [m appendFormat:@"微信 %@\n", self.wxVersion ?: @"?"];
+    [m appendFormat:@"本人 %@\n", self.selfWxid.length ? self.selfWxid : @"(未取到)"];
+    [m appendFormat:@"hook 命中 %ld / 未命中 %ld\n", (long)self.hookHit, (long)self.hookMiss];
+    [m appendString:@"──────────────\n"];
+    @synchronized (self) {
+        for (NSString *l in self.diag) [m appendFormat:@"%@\n", l];
+    }
+    if (self.diag.count == 0) [m appendString:@"(无诊断记录)\n"];
+    return m;
 }
 @end
 
@@ -179,9 +207,13 @@ static void wcai_installHooks(void) {
             g_origOnAddMsg3 = (void (*)(id, SEL, id, id))method_getImplementation(m);
             method_setImplementation(m, (IMP)wcai_onAddMsg);
             rt.hookHit++;
+            [rt diagAdd:@"[OK] 收消息 %s %s", class_getName(c), sel_getName(s)];
             WCAITrace(@"hook", @"OnAddMsg 命中 %s %s", class_getName(c), sel_getName(s));
         } else {
             rt.hookMiss++;
+            [rt diagAdd:@"[X] 收消息全未命中  类[%@]  选择器[%@]",
+                [WCAIClsMessageMgr() componentsJoinedByString:@","],
+                [WCAISelOnAddMsg() componentsJoinedByString:@","]];
         }
     }
 
@@ -193,9 +225,13 @@ static void wcai_installHooks(void) {
             g_origSendMsg = (void (*)(id, SEL, id))method_getImplementation(m);
             method_setImplementation(m, (IMP)wcai_sendMsg);
             rt.hookHit++;
+            [rt diagAdd:@"[OK] 发消息 %s %s", class_getName(c), sel_getName(s)];
             WCAITrace(@"hook", @"SendMsg 命中 %s %s", class_getName(c), sel_getName(s));
         } else {
             rt.hookMiss++;
+            [rt diagAdd:@"[X] 发消息全未命中  类[%@]  选择器[%@]",
+                [WCAIClsMessageMgr() componentsJoinedByString:@","],
+                [WCAISelSendMsg() componentsJoinedByString:@","]];
         }
     }
 
@@ -211,6 +247,9 @@ static void wcai_installHooks(void) {
     WCAITrace(@"boot", @"v%@ wx=%@ self=%@ hit=%ld miss=%ld",
               WCAI_VERSION_STR, rt.wxVersion, rt.selfWxid,
               (long)rt.hookHit, (long)rt.hookMiss);
+    [rt diagAdd:@"启动 v%@  wx=%@  self=%@  命中%ld 未命中%ld",
+        WCAI_VERSION_STR, rt.wxVersion ?: @"?", rt.selfWxid.length ? rt.selfWxid : @"(空)",
+        (long)rt.hookHit, (long)rt.hookMiss];
 
     // 未全部命中则重试（最多 3 次，间隔 1s）
     if ((!g_origOnAddMsg3 || !g_origSendMsg) && g_retry < 3) {

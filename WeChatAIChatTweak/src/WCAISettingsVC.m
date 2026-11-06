@@ -11,6 +11,9 @@
 
 #pragma mark - 主设置页
 
+@interface WCAIDiagVC : UIViewController   // 自检诊断页（前向声明，实现见文件末尾）
+@end
+
 @interface WCAISettingsVC () <UITableViewDataSource, UITableViewDelegate>
 @property (nonatomic, strong) UITableView *table;
 @property (nonatomic, strong) NSArray<NSArray<NSString *> *> *sections;
@@ -28,7 +31,7 @@
         @[ @"API 地址", @"API 密钥", @"模型" ],
         @[ @"免打扰开始(时)", @"免打扰结束(时)", @"敏感词" ],
         @[ @"联系人档案", @"立即备份数据" ],
-        @[ @"运行状态", @"清空运行日志" ]
+        @[ @"运行状态", @"清空运行日志", @"自检诊断" ]
     ];
 
     self.table = [[UITableView alloc] initWithFrame:self.view.bounds style:UITableViewStyleGrouped];
@@ -167,6 +170,8 @@
                 sqlite3_exec(db, "DELETE FROM run_log;", NULL, NULL, NULL);
             }];
             [tv reloadData];
+        } else if (ip.row == 2) {
+            [self.navigationController pushViewController:[WCAIDiagVC new] animated:YES];
         }
     }
 }
@@ -387,6 +392,42 @@
 
     [[WCAIStore shared] saveContact:self.contact];
     [self.navigationController popViewControllerAnimated:YES];
+}
+
+@end
+
+#pragma mark - 自检诊断
+
+@implementation WCAIDiagVC
+
+- (void)viewDidLoad {
+    [super viewDidLoad];
+    self.title = @"自检诊断";
+    self.view.backgroundColor = [UIColor systemBackgroundColor];
+
+    UITextView *tv = [[UITextView alloc] initWithFrame:self.view.bounds];
+    tv.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    tv.editable = NO;
+    tv.selectable = YES;
+    tv.alwaysBounceVertical = YES;
+    tv.textContainerInset = UIEdgeInsetsMake(14, 14, 14, 14);
+    tv.font = [UIFont fontWithName:@"Menlo" size:11] ?: [UIFont systemFontOfSize:11];
+    tv.text = [[WCAIRuntime shared] diagText];
+    [self.view addSubview:tv];
+
+    self.navigationItem.rightBarButtonItem =
+        [[UIBarButtonItem alloc] initWithTitle:@"复制" style:UIBarButtonItemStyleDone
+                                        target:self action:@selector(copyAll)];
+}
+
+- (void)copyAll {
+    [UIPasteboard generalPasteboard].string = [[WCAIRuntime shared] diagText];
+    UIAlertController *ac = [UIAlertController
+        alertControllerWithTitle:@"已复制"
+                         message:@"直接粘贴发出来，就能定位每个 hook 点命中与否"
+                  preferredStyle:UIAlertControllerStyleAlert];
+    [ac addAction:[UIAlertAction actionWithTitle:@"好" style:UIAlertActionStyleDefault handler:nil]];
+    [self presentViewController:ac animated:YES completion:nil];
 }
 
 @end
