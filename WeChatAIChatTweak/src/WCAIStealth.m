@@ -228,7 +228,7 @@ void WCAIInstallStealth(void) {
         if (!arr) { arr = [NSMutableArray array]; me->_sentAt[wxid] = arr; }
 
         // 清理 60s 外的记录
-        NSMutableArray *keep = [NSMutableArray array];
+        NSMutableArray<NSNumber *> *keep = [NSMutableArray array];
         for (NSNumber *t in arr) {
             if (now - t.doubleValue < 60.0) [keep addObject:t];
         }
