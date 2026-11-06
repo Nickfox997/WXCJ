@@ -44,6 +44,9 @@ static long long WCAIGetLL(id obj, NSArray<NSString *> *keys) {
 - (UITableViewCell *)aiEntryCellForTable:(UITableView *)tv;
 - (UIWindow *)mainWindow;
 - (UIViewController *)topVCFrom:(UIViewController *)vc;
+- (void)scheduleEntryCheck;
+- (void)showDiagAlert:(NSString *)title;
+- (NSString *)dumpSettingCandidates;
 - (void)openSettings;
 - (void)notify:(NSString *)msg;
 @end
@@ -419,7 +422,28 @@ static BOOL WCAIHookMethod(Class c, SEL sel, IMP newImp, IMP *outOrig) {
     [self installVCProbe];
 
     BOOL any = NO;
-    for (NSString *cn in WCAIClsSettingVC()) {
+    // 动态发现：不依赖固定类名表，扫描所有名字含 Setting/More 的类
+    NSMutableArray<NSString *> *cands = [NSMutableArray arrayWithArray:WCAIClsSettingVC()];
+    unsigned int ccount = 0;
+    Class *clslist = objc_copyClassList(&ccount);
+    if (clslist) {
+        for (unsigned int i = 0; i < ccount; i++) {
+            const char *n = class_getName(clslist[i]);
+            if (!n) continue;
+            NSString *cn = [NSString stringWithUTF8String:n];
+            if (([cn rangeOfString:@"Setting"].location != NSNotFound ||
+                 [cn rangeOfString:@"More"].location    != NSNotFound) &&
+                ![cands containsObject:cn]) {
+                [cands addObject:cn];
+            }
+        }
+        free(clslist);
+    }
+    if (cands.count) {
+        [[WCAIRuntime shared] diagAdd:@"[..] 设置页候选类 %lu 个", (unsigned long)cands.count];
+    }
+
+    for (NSString *cn in cands) {
         if ([g_hookedSettingCls containsObject:cn]) { any = YES; continue; }
         Class c = objc_getClass(cn.UTF8String);
         if (!c) continue;
@@ -444,7 +468,26 @@ static BOOL WCAIHookMethod(Class c, SEL sel, IMP newImp, IMP *outOrig) {
                 if (WCAIIsOurRow(ip.section, ip.row))
                     return [[WCAIInterceptor shared] aiEntryCellForTable:tv];
                 NSIndexPath *o = WCAIOrigIndexPath(ip);
-                return o2 ? ((F)o2)(self_, s2, tv, o) : nil;
+                UITableViewCell *cell = o2 ? ((F)o2)(self_, s2, tv, o) : nil;
+                // 探测插入点：cellForRow 一定会被调用，比 willDisplayCell 更可靠
+                if (!gProbed && cell.textLabel.text.length) {
+                    NSString *t = cell.textLabel.text;
+                    if ([t containsString:@"关于微信"] || [t isEqualToString:@"关于"]) {
+                        gInsSection = ip.section;
+                        gInsRow     = ip.row;
+                        gProbed     = YES;
+                        [[WCAIRuntime shared] diagAdd:@"[OK] 插入点(cell 探测) section=%ld row=%ld",
+                            (long)ip.section, (long)ip.row];
+                        if (!gReloading) {
+                            gReloading = YES;
+                            dispatch_async(dispatch_get_main_queue(), ^{
+                                gReloading = NO;
+                                [tv reloadData];
+                            });
+                        }
+                    }
+                }
+                return cell;
             }), &o2);
 
         // ③ 点击：我们的行打开面板，其余透传（index 要映射回去）
@@ -501,6 +544,9 @@ static BOOL WCAIHookMethod(Class c, SEL sel, IMP newImp, IMP *outOrig) {
         WCAITrace(@"hook", @"设置页类尚未加载（懒加载），等待重试");
         [[WCAIRuntime shared] diagAdd:@"[..] 设置页类未加载，等待重试"];
     }
+
+    // 首次调用时排一次自检：8 秒后若一个类都没 hook 到，弹窗给排查线索
+    [self scheduleEntryCheck];
 }
 
 /// 原生样式的「AI 助手」cell：自适配深色模式，右侧 disclosure 箭头
@@ -568,6 +614,76 @@ static BOOL WCAIHookMethod(Class c, SEL sel, IMP newImp, IMP *outOrig) {
         nav.modalPresentationStyle = UIModalPresentationFullScreen;
         [top presentViewController:nav animated:YES completion:nil];
     });
+}
+
+#pragma mark - 入口失败自检
+
+/// 首启 8 秒后检查：如果一个设置页类都没 hook 到，说明入口无处可挂，
+/// 此时没有任何 UI 可以让用户看到诊断（入口挂了就进不去面板）。
+/// 所以主动弹一次窗，把候选类清单给出来。
+- (void)scheduleEntryCheck {
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(8.0 * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{
+            if (g_hookedSettingCls.count > 0) {
+                [[WCAIRuntime shared] diagAdd:@"[OK] 设置页已 hook %lu 个类",
+                    (unsigned long)g_hookedSettingCls.count];
+                return;
+            }
+            [self showDiagAlert:@"设置页 hook 全部失败"];
+        });
+    });
+}
+
+- (void)showDiagAlert:(NSString *)title {
+    WCAIOnMain(^{
+        UIWindow *win = [self mainWindow];
+        UIViewController *top = win ? [self topVCFrom:win.rootViewController] : nil;
+        if (!top) return;
+
+        NSString *dump = [self dumpSettingCandidates];
+        NSString *msg = [NSString stringWithFormat:@"%@\n\n扫描到的设置相关类：\n%@", title, dump];
+        if (msg.length > 1200) msg = [[msg substringToIndex:1200] stringByAppendingString:@"…"];
+
+        [[WCAIRuntime shared] diagAdd:@"%@", msg];
+
+        UIAlertController *ac = [UIAlertController
+            alertControllerWithTitle:@"AI 插件自检"
+                             message:msg
+                      preferredStyle:UIAlertControllerStyleAlert];
+        [ac addAction:[UIAlertAction actionWithTitle:@"复制全部" style:UIAlertActionStyleDefault
+                                            handler:^(UIAlertAction *a) {
+            [UIPasteboard generalPasteboard].string = [[WCAIRuntime shared] diagText];
+        }]];
+        [ac addAction:[UIAlertAction actionWithTitle:@"关闭"
+                                               style:UIAlertActionStyleCancel handler:nil]];
+        [top presentViewController:ac animated:YES completion:nil];
+    });
+}
+
+- (NSString *)dumpSettingCandidates {
+    NSMutableString *m = [NSMutableString string];
+    unsigned int count = 0;
+    Class *classes = objc_copyClassList(&count);
+    if (classes) {
+        for (unsigned int i = 0; i < count; i++) {
+            Class c = classes[i];
+            const char *n = class_getName(c);
+            if (!n) continue;
+            NSString *cn = [NSString stringWithUTF8String:n];
+            if ([cn rangeOfString:@"Setting"].location == NSNotFound &&
+                [cn rangeOfString:@"More"].location    == NSNotFound) continue;
+            BOOL rows = class_getInstanceMethod(c, @selector(tableView:numberOfRowsInSection:)) != NULL;
+            BOOL cell = class_getInstanceMethod(c, @selector(tableView:cellForRowAtIndexPath:)) != NULL;
+            Class sup = class_getSuperclass(c);
+            [m appendFormat:@"%@ (%s) rows:%d cell:%d\n", cn,
+                sup ? class_getName(sup) : "nil", rows, cell];
+        }
+        free(classes);
+    }
+    if (m.length == 0) [m appendString:@"（一个都没找到）"];
+    return m;
 }
 
 @end
