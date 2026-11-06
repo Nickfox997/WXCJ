@@ -17,6 +17,9 @@
 /// 挂设置页入口
 - (void)installSettingsEntry;
 
+/// 悬浮球入口（不依赖微信类名；同时是「dylib 是否加载」的可视信号）
+- (void)installFloatBall;
+
 /// 用户确认后发送（手动模式唯一发出口）
 - (void)sendText:(NSString *)text toWxid:(NSString *)wxid;
 

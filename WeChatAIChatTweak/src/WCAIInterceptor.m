@@ -368,6 +368,7 @@ static long long WCAIGetLL(id obj, NSArray<NSString *> *keys) {
         });
         method_setImplementation(m, newImp);
         WCAITrace(@"hook", @"设置入口命中 %s", class_getName(c));
+        [self installFloatBall];   // 双保险：设置页入口 + 悬浮球，任一可见即可进
         return;
     }
     WCAITrace(@"hook", @"设置入口未命中，改用悬浮球入口");
@@ -405,8 +406,75 @@ static long long WCAIGetLL(id obj, NSArray<NSString *> *keys) {
 }
 
 - (void)installFloatBall {
-    // 极简兜底：无设置页 hook 时，在首次生成弹窗里提供入口
-    WCAITrace(@"hook", @"使用弹窗内设置入口作为兜底");
+    // 真兜底：不依赖任何微信类名，直接挂到 keyWindow 上。
+    // 它同时是「dylib 有没有被加载」的可视信号：
+    //   球在 = dylib 加载成功（只是设置页 hook 没命中）
+    //   球不在 = dylib 根本没加载（注入/签名问题，与代码无关）
+    WCAITrace(@"hook", @"启用悬浮球入口");
+    __weak typeof(self) wself = self;
+    WCAIOnMain(^{
+        [wself placeFloatBall];
+        // keyWindow 会随页面切换被替换，定时补挂（球还在时只是提到最上层）
+        [NSTimer scheduledTimerWithTimeInterval:3.0 repeats:YES block:^(NSTimer *tm) {
+            [wself placeFloatBall];
+        }];
+    });
+}
+
+- (UIWindow *)currentKeyWindow {
+    @try {
+        UIWindow *kw = UIApplication.sharedApplication.keyWindow;
+        if (kw) return kw;
+        for (UIWindow *w in UIApplication.sharedApplication.windows) {
+            if (w.isKeyWindow) return w;
+        }
+        return UIApplication.sharedApplication.windows.firstObject;
+    } @catch (__unused NSException *e) { return nil; }
+}
+
+- (void)placeFloatBall {
+    @try {
+        UIWindow *win = [self currentKeyWindow];
+        if (!win) return;
+        UIView *old = [win viewWithTag:0x5743414A];
+        if (old) {
+            if (old.superview != win) [win addSubview:old];
+            [win bringSubviewToFront:old];
+            return;
+        }
+        UIButton *ball = [UIButton buttonWithType:UIButtonTypeCustom];
+        ball.tag = 0x5743414A;
+        ball.frame = CGRectMake(12, 180, 46, 46);
+        ball.backgroundColor = [UIColor colorWithWhite:0.12 alpha:0.80];
+        ball.layer.cornerRadius = 23;
+        ball.layer.borderWidth = 1.0;
+        ball.layer.borderColor = [UIColor colorWithWhite:1.0 alpha:0.28].CGColor;
+        ball.titleLabel.font = [UIFont boldSystemFontOfSize:14];
+        [ball setTitle:@"AI" forState:UIControlStateNormal];
+        [ball setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+        [ball addTarget:self action:@selector(openSettings)
+       forControlEvents:UIControlEventTouchUpInside];
+        UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc]
+                                        initWithTarget:self action:@selector(dragBall:)];
+        pan.cancelsTouchesInView = NO;   // 不抢掉点击
+        [ball addGestureRecognizer:pan];
+        [win addSubview:ball];
+        WCAITrace(@"hook", @"悬浮球已挂载");
+    } @catch (__unused NSException *e) {}
+}
+
+- (void)dragBall:(UIPanGestureRecognizer *)g {
+    UIView *v = g.view;
+    UIView *sp = v.superview;
+    if (!sp) return;
+    CGPoint p = [g translationInView:sp];
+    CGFloat half = v.bounds.size.width / 2.0;
+    CGFloat nx = v.center.x + p.x;
+    CGFloat ny = v.center.y + p.y;
+    nx = MAX(half + 4, MIN(nx, sp.bounds.size.width  - half - 4));
+    ny = MAX(half + 4, MIN(ny, sp.bounds.size.height - half - 4));
+    v.center = CGPointMake(nx, ny);
+    [g setTranslation:CGPointZero inView:sp];
 }
 
 @end

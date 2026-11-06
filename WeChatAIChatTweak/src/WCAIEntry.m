@@ -272,7 +272,13 @@ static void wcai_entry(void) {
         // ② 崩溃自保护：上次启动没跑满 10s 就退 → 本次静默，避免连环崩
         BOOL silent = WCAIShouldRunSilently();
         WCAIMarkBootOK();
-        if (silent) return;
+        if (silent) {
+            // 静默不是「消失」：仍然挂球，让你能确认插件确实被加载了，
+            // 同时能看到「因为上次异常退出所以本次静默」这个状态。
+            [[WCAIRuntime shared] diagAdd:@"上次启动异常退出 → 本次静默模式（未装 hook）"];
+            [[WCAIInterceptor shared] installFloatBall];
+            return;
+        }
 
         [WCAIRuntime shared].bootTime = [NSDate timeIntervalSinceReferenceDate];
         [[WCAIStore shared] openDefault];
