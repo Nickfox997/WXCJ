@@ -48,9 +48,11 @@ static inline NSArray<NSString *> *WCAISelHistoryLoad(void) {
               @"getMessages:",
               @"loadMessages:" ];
 }
-// 设置页 VC（微信各版本差异很大；命中任一即可，另有标题嗅探兜底）
+// 可插入入口的页面类（命中任一即可）
+// MoreViewController = 微信底部「我」页面（实测存在于 8.0.x）
 static inline NSArray<NSString *> *WCAIClsSettingVC(void) {
-    return @[ @"NewSettingViewController",
+    return @[ @"MoreViewController",
+              @"NewSettingViewController",
               @"MMSettingViewController",
               @"MMSettingsViewController",
               @"WCSettingsViewController",

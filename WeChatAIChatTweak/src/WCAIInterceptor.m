@@ -493,12 +493,16 @@ static BOOL WCAIHookMethod(Class c, SEL sel, IMP newImp, IMP *outOrig) {
                 // 探测插入点：cellForRow 一定会被调用，比 willDisplayCell 更可靠
                 if (!gProbed && cell.textLabel.text.length) {
                     NSString *t = cell.textLabel.text;
-                    if ([t containsString:@"关于微信"] || [t isEqualToString:@"关于"]) {
+                    // 锚点：「关于微信」/「关于」= 设置页；「设置」= 我 页面
+                    if ([t containsString:@"关于微信"] ||
+                        [t isEqualToString:@"关于"] ||
+                        [t isEqualToString:@"设置"] ||
+                        [t isEqualToString:@"Settings"]) {
                         gInsSection = ip.section;
                         gInsRow     = ip.row;
                         gProbed     = YES;
-                        [[WCAIRuntime shared] diagAdd:@"[OK] 插入点(cell 探测) section=%ld row=%ld",
-                            (long)ip.section, (long)ip.row];
+                        [[WCAIRuntime shared] diagAdd:@"[OK] 插入点(cell 探测) section=%ld row=%ld 锚点=%@",
+                            (long)ip.section, (long)ip.row, t];
                         if (!gReloading) {
                             gReloading = YES;
                             dispatch_async(dispatch_get_main_queue(), ^{
@@ -535,7 +539,10 @@ static BOOL WCAIHookMethod(Class c, SEL sel, IMP newImp, IMP *outOrig) {
                 if (gProbed) return;
                 @try {
                     NSString *t = cell.textLabel.text;
-                    if (t.length && [t containsString:@"关于微信"]) {
+                    if (t.length && ([t containsString:@"关于微信"] ||
+                                     [t isEqualToString:@"关于"] ||
+                                     [t isEqualToString:@"设置"] ||
+                                     [t isEqualToString:@"Settings"])) {
                         gInsSection = ip.section;
                         gInsRow     = ip.row;
                         gProbed     = YES;
