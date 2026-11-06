@@ -660,7 +660,9 @@ static const NSInteger kWCAIBallTag = 0x5743414A;
 
         CGRect f = CGRectMake(14, 170, 52, 52);
         UIWindow *win = nil;
-        // iOS 13+ 必须挂到 windowScene，否则窗口不会显示
+        // iOS 13+ 必须等有活跃 windowScene 之后才建窗。
+        // constructor 阶段 UIApplication 还没起来，initWithFrame: 建出的无 scene
+        // 窗口会在后续被系统断言 —— 表现就是启动闪退一次。
         if (@available(iOS 13.0, *)) {
             UIWindowScene *scene = nil;
             for (UIScene *s in UIApplication.sharedApplication.connectedScenes) {
@@ -669,9 +671,14 @@ static const NSInteger kWCAIBallTag = 0x5743414A;
                 scene = (UIWindowScene *)s;
                 break;
             }
-            if (scene) win = [[UIWindow alloc] initWithWindowScene:scene];
+            if (!scene) {
+                WCAITrace(@"ui", @"无活跃 windowScene，等 App 激活后再建球");
+                return;   // 下一轮 DidBecomeActive 会重试
+            }
+            win = [[UIWindow alloc] initWithWindowScene:scene];
+        } else {
+            win = [[UIWindow alloc] initWithFrame:f];
         }
-        if (!win) win = [[UIWindow alloc] initWithFrame:f];
 
         win.frame = f;
         win.windowLevel = UIWindowLevelAlert + 1;   // 高于微信自己的视图层，不会被盖住

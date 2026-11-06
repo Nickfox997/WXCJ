@@ -269,41 +269,43 @@ static void wcai_entry(void) {
         // ① 隐蔽层必须最先装（越狱检测多在启动早期调用）
         WCAIInstallStealth();
 
-        // ② 崩溃自保护：上次启动没跑满 10s 就退 → 本次静默，避免连环崩
-        BOOL silent = WCAIShouldRunSilently();
-        WCAIMarkBootOK();
-        if (silent) {
-            // 静默模式：不装 hook，但保留悬浮球——球不依赖任何微信类名，
-            // 同时它是「dylib 有没有真的加载」的可视信号
-            [[WCAIRuntime shared] diagAdd:@"上次启动异常退出 → 本次静默模式（未装 hook）"];
-            [[WCAIInterceptor shared] installFloatBall];
-            return;
-        }
-
-        [WCAIRuntime shared].bootTime = [NSDate timeIntervalSinceReferenceDate];
-        [[WCAIStore shared] openDefault];
-
-        // 入口：悬浮球（独立 UIWindow，不等任何类加载）
-        [[WCAIInterceptor shared] installFloatBall];
-
-        // 延迟 2s：等微信 ServiceCenter 初始化完成，避免早期取不到类
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)),
-                       dispatch_get_main_queue(), ^{
-            wcai_installHooks();
-        });
-
-        // 回前台时刷新 selfWxid（换号场景）
+        // ② 所有 UI 一律等 App 激活之后再建。
+        //    constructor 阶段 UIApplication 尚未就绪，此时创建 UIWindow 会让
+        //    iOS 13+ 的 scene 架构断言崩溃 —— 表现就是装上后第一次启动闪退。
         [[NSNotificationCenter defaultCenter] addObserverForName:UIApplicationDidBecomeActiveNotification
-                                                          object:nil queue:[NSOperationQueue mainQueue]
+                                                          object:nil
+                                                           queue:[NSOperationQueue mainQueue]
                                                       usingBlock:^(NSNotification *n) {
+            // 悬浮球（幂等：已存在直接返回）
+            [[WCAIInterceptor shared] installFloatBall];
+
+            // selfWxid 刷新（换号场景）
             WCAIRuntime *r = [WCAIRuntime shared];
             NSString *now = WCAIResolveSelfWxid();
             if (now.length && ![now isEqualToString:r.selfWxid]) {
                 r.selfWxid = now;
                 WCAITrace(@"account", @"selfWxid 变更 → %@", now);
             }
-            // 回前台重试入口：微信 UI 类是懒加载的，用户点过设置页之后才存在
+
+            // 设置页入口重试（微信 UI 类懒加载，点过之后才存在）
             [[WCAIInterceptor shared] installSettingsEntry];
         }];
+
+        // ③ 崩溃自保护：上次启动没跑满 10s 就退 → 本次静默，避免连环崩
+        BOOL silent = WCAIShouldRunSilently();
+        WCAIMarkBootOK();
+        if (silent) {
+            [[WCAIRuntime shared] diagAdd:@"上次启动异常退出 → 本次静默模式（未装 hook）"];
+            return;   // 球由上面的观察者建，这里不重复
+        }
+
+        [WCAIRuntime shared].bootTime = [NSDate timeIntervalSinceReferenceDate];
+        [[WCAIStore shared] openDefault];
+
+        // 延迟 2s：等微信 ServiceCenter 初始化完成，避免早期取不到类
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{
+            wcai_installHooks();
+        });
     }
 }
