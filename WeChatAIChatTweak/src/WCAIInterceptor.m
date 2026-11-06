@@ -45,6 +45,11 @@ static long long WCAIGetLL(id obj, NSArray<NSString *> *keys) {
 - (UIWindow *)mainWindow;
 - (UIViewController *)topVCFrom:(UIViewController *)vc;
 - (void)scheduleEntryCheck;
+- (void)installTabProbe;
+- (void)probeTabPage:(UIViewController *)vc;
+- (UITableView *)findTableIn:(UIView *)root;
+- (NSString *)dumpTableIn:(UIViewController *)vc;
+- (void)rescanCurrentPage;
 - (void)showDiagAlert:(NSString *)title;
 - (NSString *)dumpSettingCandidates;
 - (void)openSettings;
@@ -359,6 +364,8 @@ static NSInteger gInsSection = -1;
 static NSInteger gInsRow     = -1;
 static BOOL      gProbed     = NO;
 static BOOL      gReloading  = NO;
+static BOOL      gPromptedSetting = NO;   // 设置页结构提示只弹一次
+static BOOL      gPromptedMe      = NO;   // 「我」页结构提示只弹一次
 
 static BOOL WCAIIsOurRow(NSInteger s, NSInteger r) {
     return (gProbed && s == gInsSection && r == gInsRow);
@@ -409,6 +416,15 @@ static BOOL WCAIHookMethod(Class c, SEL sel, IMP newImp, IMP *outOrig) {
                                    dispatch_get_main_queue(), ^{
                         [[WCAIInterceptor shared] installSettingsEntry];
                     });
+                    // 进了设置页 2 秒还没插进去 → 把这一页的真实结构报出来
+                    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)),
+                                   dispatch_get_main_queue(), ^{
+                        if (gProbed || gPromptedSetting) return;
+                        gPromptedSetting = YES;
+                        NSString *dump = [[WCAIInterceptor shared] dumpTableIn:vc];
+                        [[WCAIInterceptor shared] showDiagAlert:
+                            [NSString stringWithFormat:@"设置页未插入成功，结构：\n%@", dump]];
+                    });
                 }
             } @catch (__unused NSException *e) {}
         });
@@ -417,9 +433,46 @@ static BOOL WCAIHookMethod(Class c, SEL sel, IMP newImp, IMP *outOrig) {
     });
 }
 
+/// Tab 嗅探：捕获「我」页面切换。设置页若始终插不进去，入口就改挂「我」页面——
+/// 那里就几个固定项，结构比设置页简单得多。
+- (void)installTabProbe {
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        Class tabCls = [UITabBarController class];
+        SEL s1 = @selector(setSelectedViewController:);
+        __block IMP o1 = NULL;
+        WCAIHookMethod(tabCls, s1,
+            imp_implementationWithBlock(^(id self_, UIViewController *vc) {
+                typedef void (*F)(id, SEL, UIViewController *);
+                if (o1) ((F)o1)(self_, s1, vc);
+                @try { [[WCAIInterceptor shared] probeTabPage:vc]; }
+                @catch (__unused NSException *e) {}
+            }), &o1);
+        WCAITrace(@"hook", @"Tab 嗅探已安装");
+    });
+}
+
+- (void)probeTabPage:(UIViewController *)vc {
+    if (![vc isKindOfClass:[UIViewController class]]) return;
+    NSString *cn = NSStringFromClass([vc class]);
+    NSString *t  = vc.title;
+    [[WCAIRuntime shared] diagAdd:@"[TAB] %@ | %@", cn, t.length ? t : @"(无标题)"];
+    if ([t isEqualToString:@"我"] || [t isEqualToString:@"Me"] ||
+        [cn rangeOfString:@"Me"].location != NSNotFound) {
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{
+            if (gPromptedMe) return;
+            gPromptedMe = YES;
+            NSString *dump = [self dumpTableIn:vc];
+            [self showDiagAlert:[NSString stringWithFormat:@"「我」页面结构：\n%@", dump]];
+        });
+    }
+}
+
 - (void)installSettingsEntry {
     if (!g_hookedSettingCls) g_hookedSettingCls = [NSMutableSet set];
     [self installVCProbe];
+    [self installTabProbe];
 
     BOOL any = NO;
     // 动态发现：不依赖固定类名表，扫描所有名字含 Setting/More 的类
@@ -642,8 +695,7 @@ static BOOL WCAIHookMethod(Class c, SEL sel, IMP newImp, IMP *outOrig) {
         UIViewController *top = win ? [self topVCFrom:win.rootViewController] : nil;
         if (!top) return;
 
-        NSString *dump = [self dumpSettingCandidates];
-        NSString *msg = [NSString stringWithFormat:@"%@\n\n扫描到的设置相关类：\n%@", title, dump];
+        NSString *msg = title ?: @"";
         if (msg.length > 1200) msg = [[msg substringToIndex:1200] stringByAppendingString:@"…"];
 
         [[WCAIRuntime shared] diagAdd:@"%@", msg];
@@ -652,6 +704,15 @@ static BOOL WCAIHookMethod(Class c, SEL sel, IMP newImp, IMP *outOrig) {
             alertControllerWithTitle:@"AI 插件自检"
                              message:msg
                       preferredStyle:UIAlertControllerStyleAlert];
+        __weak UIAlertController *wac = ac;
+        [ac addAction:[UIAlertAction actionWithTitle:@"重新扫描" style:UIAlertActionStyleDefault
+                                            handler:^(UIAlertAction *a) {
+            [wac dismissViewControllerAnimated:YES completion:nil];
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.8 * NSEC_PER_SEC)),
+                           dispatch_get_main_queue(), ^{
+                [[WCAIInterceptor shared] rescanCurrentPage];
+            });
+        }]];
         [ac addAction:[UIAlertAction actionWithTitle:@"复制全部" style:UIAlertActionStyleDefault
                                             handler:^(UIAlertAction *a) {
             [UIPasteboard generalPasteboard].string = [[WCAIRuntime shared] diagText];
@@ -660,6 +721,52 @@ static BOOL WCAIHookMethod(Class c, SEL sel, IMP newImp, IMP *outOrig) {
                                                style:UIAlertActionStyleCancel handler:nil]];
         [top presentViewController:ac animated:YES completion:nil];
     });
+}
+
+/// 在视图树里找第一个 UITableView
+- (UITableView *)findTableIn:(UIView *)root {
+    if (!root) return nil;
+    NSMutableArray *stack = [NSMutableArray arrayWithObject:root];
+    while (stack.count) {
+        UIView *v = stack.lastObject;
+        [stack removeLastObject];
+        if ([v isKindOfClass:[UITableView class]]) return (UITableView *)v;
+        for (UIView *s in v.subviews) [stack addObject:s];
+    }
+    return nil;
+}
+
+/// dump 页面列表结构：section/row 数 + 当前可见行文本
+- (NSString *)dumpTableIn:(UIViewController *)vc {
+    NSMutableString *m = [NSMutableString string];
+    [m appendFormat:@"VC: %@\n", NSStringFromClass([vc class])];
+    if (![vc isKindOfClass:[UIViewController class]]) { [m appendString:@"(不是 VC)\n"]; return m; }
+    UITableView *tv = [self findTableIn:vc.view];
+    if (!tv) { [m appendString:@"(视图树里没有 UITableView)\n"]; return m; }
+
+    NSInteger secs = [tv numberOfSections];
+    [m appendFormat:@"sections=%ld\n", (long)secs];
+    for (NSInteger s = 0; s < secs; s++) {
+        NSInteger rows = [tv numberOfRowsInSection:s];
+        [m appendFormat:@"  s%ld rows=%ld", (long)s, (long)rows];
+        for (UITableViewCell *c in tv.visibleCells) {
+            NSIndexPath *ip = [tv indexPathForCell:c];
+            if (ip.section != s) continue;
+            NSString *t = c.textLabel.text;
+            if (t.length) [m appendFormat:@" [r%ld %@]", (long)ip.row, t];
+        }
+        [m appendString:@"\n"];
+    }
+    return m;
+}
+
+/// 重新扫描当前最顶层页面（「重新扫描」按钮用）
+- (void)rescanCurrentPage {
+    UIWindow *win = [self mainWindow];
+    UIViewController *top = win ? [self topVCFrom:win.rootViewController] : nil;
+    if (!top) return;
+    NSString *dump = [self dumpTableIn:top];
+    [self showDiagAlert:[NSString stringWithFormat:@"当前页面结构：\n%@", dump]];
 }
 
 - (NSString *)dumpSettingCandidates {
