@@ -6,39 +6,30 @@ on:
 
 jobs:
   build:
-    runs-on: macos-14
+    # 用 Linux runner：Theos 完整支持，额度消耗是 macOS 的 1/10
+    # （macOS arm64 runner 在免费账号下不支持，勿改回 macos-14）
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
     steps:
       - uses: actions/checkout@v4
 
       - name: Setup Theos
-        run: |
-          brew install ldid xz
-          git clone --recursive --depth 1 https://github.com/theos/theos.git "$HOME/theos"
-          mkdir -p "$HOME/theos/sdks"
-          curl -L https://github.com/theos/sdks/archive/refs/heads/master.tar.gz -o /tmp/sdks.tgz
-          tar xzf /tmp/sdks.tgz -C /tmp
-          cp -R /tmp/sdks-master/*.sdk "$HOME/theos/sdks/"
-          ls "$HOME/theos/sdks"
+        run: bash scripts/wsl-setup.sh
 
       - name: Build
-        run: |
-          export THEOS="$HOME/theos"
-          export PATH="$THEOS/bin:$PATH"
-          # 若仓库根就是工程目录，把下一行改成 cd .
-          cd WeChatAIChatTweak
-          make
+        run: bash scripts/build-here.sh
 
       - name: Verify artifact
         run: |
           set -e
-          DYLIB=$(find . -name 'libmarsbridge.dylib' | head -n1)
-          echo "artifact=$DYLIB"
-          file "$DYLIB"
-          lipo -info "$DYLIB"
-          otool -D "$DYLIB"
+          ls -lh libmarsbridge.dylib
+          file libmarsbridge.dylib
+          lipo -info libmarsbridge.dylib || true
 
       - uses: actions/upload-artifact@v4
         with:
           name: libmarsbridge
-          path: '**/libmarsbridge.dylib'
+          path: libmarsbridge.dylib
           if-no-files-found: error
+          retention-days: 14

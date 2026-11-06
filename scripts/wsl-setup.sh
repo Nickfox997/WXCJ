@@ -1,76 +1,116 @@
 #!/usr/bin/env bash
-# WSL(Ubuntu) 一次性环境安装：工具链 + Theos + iOS SDK
-# 用法：在 Ubuntu 终端里执行
-#   bash /mnt/g/智能体工作区/DSH-微信AI助手/scripts/wsl-setup.sh
+# Linux 环境一次性安装：工具链 + Theos + 最新 iOS SDK
+# 适用于：WSL / GitHub Actions(ubuntu) / 云服务器 / Codespaces
+# 用法：
+#   bash scripts/wsl-setup.sh
 
 set -uo pipefail
 
-echo "== [1/6] apt 索引 =="
-sudo apt update || { echo "apt update 失败，检查网络/源"; exit 1; }
+THEOS_DIR="${THEOS:-$HOME/theos}"
 
-echo "== [2/6] 基础工具链 =="
-sudo apt install -y git make clang fakeroot dpkg-dev xz-utils unzip curl \
-    libssl-dev zlib1g-dev libtinfo-dev libplist-utils libplist-dev \
-    libplist++-dev || true
+echo "== [1/6] apt 索引 =="
+sudo apt-get update -qq || { echo "apt update 失败"; exit 1; }
+
+# 核心包：必须成功
+echo "== [2/6] 核心工具链 =="
+sudo apt-get install -y -qq git make clang fakeroot dpkg-dev xz-utils unzip curl \
+    libssl-dev zlib1g-dev libplist-utils libplist-dev \
+  || { echo "核心工具链安装失败"; exit 1; }
+
+# 可选包：装不上不影响构建（不同发行版包名不一致）
+echo "== [2b] 可选包（失败忽略）=="
+sudo apt-get install -y -qq libtinfo-dev libncurses-dev ldid 2>/dev/null || true
 
 echo "== [3/6] ldid =="
 if ! command -v ldid >/dev/null 2>&1; then
-    echo "apt 无 ldid，尝试从 Procursus 拉取..."
-    curl -fL -o /tmp/ldid.zip \
-        https://github.com/ProcursusTeam/ldid/releases/latest/download/ldid_linux_x86_64.zip 2>/dev/null \
-      && sudo unzip -o /tmp/ldid.zip -d /usr/local/bin/ \
-      && sudo chmod +x /usr/local/bin/ldid \
-      && echo "ldid 安装完成" \
-      || echo "!! ldid 自动安装失败，请手动下载 ldid_linux_x86_64.zip 解压到 /usr/local/bin"
+    echo "apt 无 ldid，从 Procursus 取静态二进制..."
+    ok=0
+    for url in \
+      "https://github.com/ProcursusTeam/ldid/releases/latest/download/ldid_linux_x86_64.zip" \
+      "https://github.com/ProcursusTeam/ldid/releases/latest/download/ldid_linux_x86_64"
+    do
+        if curl -fL "$url" -o /tmp/ldid.bin 2>/dev/null; then ok=1; break; fi
+    done
+    if [ "$ok" = "1" ]; then
+        if file /tmp/ldid.bin 2>/dev/null | grep -qi zip; then
+            sudo unzip -o -q /tmp/ldid.bin -d /usr/local/bin/
+        else
+            sudo cp /tmp/ldid.bin /usr/local/bin/ldid
+        fi
+        sudo chmod +x /usr/local/bin/ldid 2>/dev/null
+        # zip 里可能是子目录，兜底找一下
+        if ! command -v ldid >/dev/null 2>&1; then
+            found=$(sudo find /usr/local/bin -name 'ldid*' -type f 2>/dev/null | head -1)
+            [ -n "$found" ] && sudo ln -sf "$found" /usr/local/bin/ldid
+        fi
+    else
+        echo "!! ldid 获取失败，signing 步骤会跳过（dylib 仍可产出，全能签会重新签名）"
+    fi
 fi
-command -v ldid >/dev/null 2>&1 && ldid -v 2>&1 | head -2
+command -v ldid >/dev/null 2>&1 && { echo -n "  ldid: "; ldid -v 2>&1 | head -1; } || echo "  ldid: 缺失（不阻断）"
 
 echo "== [4/6] Theos =="
-if [ ! -d "$HOME/theos/makefiles" ]; then
-    git clone --recursive https://github.com/theos/theos.git "$HOME/theos" \
+if [ ! -d "$THEOS_DIR/makefiles" ]; then
+    git clone --recursive --depth 1 https://github.com/theos/theos.git "$THEOS_DIR" \
       || { echo "theos clone 失败"; exit 1; }
 else
-    echo "已存在，跳过 clone"
+    echo "  已存在，跳过"
 fi
 
-echo "== [5/6] iOS SDK =="
-mkdir -p "$HOME/theos/sdks"
-if ! ls "$HOME"/theos/sdks/*.sdk >/dev/null 2>&1; then
-    curl -fL https://github.com/theos/sdks/archive/refs/heads/master.tar.gz -o /tmp/sdks.tgz \
-      || { echo "SDK 下载失败，手动放 .sdk 到 ~/theos/sdks/"; exit 1; }
-    tar xzf /tmp/sdks.tgz -C /tmp
-    # 只装最新的一个 iPhoneOS SDK：全量拷贝要 10G+，Codespaces 磁盘扛不住
-    LATEST=$(ls -d /tmp/sdks-master/iPhoneOS*.sdk 2>/dev/null | sort -V | tail -1)
-    if [ -n "${LATEST:-}" ]; then
-        cp -R "$LATEST" "$HOME/theos/sdks/"
-        echo "已安装 $(basename "$LATEST")（只装最新一个）"
-    else
-        echo "!! 未找到 iPhoneOS*.sdk，退回全量拷贝"
-        cp -R /tmp/sdks-master/*.sdk "$HOME/theos/sdks/" 2>/dev/null || true
+echo "== [5/6] iOS SDK（只取最新的一个）=="
+mkdir -p "$THEOS_DIR/sdks"
+if ls "$THEOS_DIR"/sdks/*.sdk >/dev/null 2>&1; then
+    echo "  已存在 SDK，跳过"
+else
+    # 全量 sdks 仓库解压约 15G，CI runner 只有 ~14G 可用 → 必须 sparse 只取一个
+    LATEST=$(curl -fsSL https://api.github.com/repos/theos/sdks/contents/ 2>/dev/null \
+      | python3 -c '
+import sys, json
+try:
+    ns = [x["name"] for x in json.load(sys.stdin)
+          if x["name"].startswith("iPhoneOS") and x["name"].endswith(".sdk")]
+    ns.sort(key=lambda s: [int(p) for p in s.replace("iPhoneOS","").replace(".sdk","").split(".")])
+    print(ns[-1] if ns else "")
+except Exception:
+    print("")
+' 2>/dev/null)
+    [ -z "${LATEST:-}" ] && LATEST="iPhoneOS16.5.sdk"
+    echo "  目标 SDK: $LATEST"
+
+    git clone --filter=blob:none --sparse https://github.com/theos/sdks.git /tmp/sdks-src \
+      || { echo "!! sdks 仓库 clone 失败"; }
+    if [ -d /tmp/sdks-src ]; then
+        ( cd /tmp/sdks-src && git sparse-checkout set "$LATEST" ) || true
+        if [ -d "/tmp/sdks-src/$LATEST" ]; then
+            cp -R "/tmp/sdks-src/$LATEST" "$THEOS_DIR/sdks/"
+            echo "  已安装 $LATEST"
+        else
+            echo "!! sparse checkout 未拿到 $LATEST"
+        fi
+        rm -rf /tmp/sdks-src
     fi
-    rm -rf /tmp/sdks-master /tmp/sdks.tgz
 fi
-echo "SDK 列表："; ls "$HOME"/theos/sdks
+echo -n "  SDK 列表: "; ls "$THEOS_DIR"/sdks 2>/dev/null | tr '\n' ' '; echo
 
 echo "== [6/6] 环境变量 =="
-if ! grep -q 'export THEOS=' "$HOME/.bashrc" 2>/dev/null; then
+export THEOS="$THEOS_DIR"
+export PATH="$THEOS/bin:$PATH"
+if [ -w "$HOME" ] && ! grep -q 'export THEOS=' "$HOME/.bashrc" 2>/dev/null; then
     {
         echo ''
         echo '# ---- Theos ----'
-        echo 'export THEOS=$HOME/theos'
+        echo "export THEOS=$THEOS_DIR"
         echo 'export PATH=$THEOS/bin:$PATH'
-    } >> "$HOME/.bashrc"
+    } >> "$HOME/.bashrc" 2>/dev/null || true
 fi
-export THEOS="$HOME/theos"
-export PATH="$THEOS/bin:$PATH"
 
 echo
 echo "======================================================"
 echo "自检："
 echo "  THEOS = $THEOS"
-echo -n "  make  = "; command -v make || echo "缺失"
+echo -n "  make  = "; command -v make  || echo "缺失"
 echo -n "  clang = "; command -v clang || echo "缺失"
-echo -n "  ldid  = "; command -v ldid || echo "缺失"
+echo -n "  ldid  = "; command -v ldid  || echo "缺失（不阻断）"
+echo "  SDK   = $(ls "$THEOS_DIR"/sdks 2>/dev/null | head -1)"
 echo "======================================================"
-echo "下一步：新开一个终端（或 source ~/.bashrc），然后执行"
-echo "  bash /mnt/g/智能体工作区/DSH-微信AI助手/scripts/wsl-build.sh"
+echo "下一步：bash scripts/build-here.sh"
