@@ -273,13 +273,18 @@ static void wcai_entry(void) {
         BOOL silent = WCAIShouldRunSilently();
         WCAIMarkBootOK();
         if (silent) {
-            // 静默模式不做任何 UI（悬浮球已移除），只留诊断记录
+            // 静默模式：不装 hook，但保留悬浮球——球不依赖任何微信类名，
+            // 同时它是「dylib 有没有真的加载」的可视信号
             [[WCAIRuntime shared] diagAdd:@"上次启动异常退出 → 本次静默模式（未装 hook）"];
+            [[WCAIInterceptor shared] installFloatBall];
             return;
         }
 
         [WCAIRuntime shared].bootTime = [NSDate timeIntervalSinceReferenceDate];
         [[WCAIStore shared] openDefault];
+
+        // 入口：悬浮球（独立 UIWindow，不等任何类加载）
+        [[WCAIInterceptor shared] installFloatBall];
 
         // 延迟 2s：等微信 ServiceCenter 初始化完成，避免早期取不到类
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)),

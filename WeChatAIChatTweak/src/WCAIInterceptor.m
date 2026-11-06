@@ -39,6 +39,11 @@ static long long WCAIGetLL(id obj, NSArray<NSString *> *keys) {
 }
 
 @interface WCAIInterceptor ()
+@property (nonatomic, strong) UIWindow *ballWindow;
+- (void)installFloatBall;
+- (void)createBallWindow;
+- (void)onBallTap;
+- (void)onBallPan:(UIPanGestureRecognizer *)g;
 - (void)ingestHistoryArray:(NSArray *)arr;
 - (BOOL)text:(NSString *)text hitWords:(NSString *)words;
 - (UITableViewCell *)aiEntryCellForTable:(UITableView *)tv;
@@ -416,15 +421,6 @@ static BOOL WCAIHookMethod(Class c, SEL sel, IMP newImp, IMP *outOrig) {
                                    dispatch_get_main_queue(), ^{
                         [[WCAIInterceptor shared] installSettingsEntry];
                     });
-                    // 进了设置页 2 秒还没插进去 → 把这一页的真实结构报出来
-                    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)),
-                                   dispatch_get_main_queue(), ^{
-                        if (gProbed || gPromptedSetting) return;
-                        gPromptedSetting = YES;
-                        NSString *dump = [[WCAIInterceptor shared] dumpTableIn:vc];
-                        [[WCAIInterceptor shared] showDiagAlert:
-                            [NSString stringWithFormat:@"设置页未插入成功，结构：\n%@", dump]];
-                    });
                 }
             } @catch (__unused NSException *e) {}
         });
@@ -457,16 +453,7 @@ static BOOL WCAIHookMethod(Class c, SEL sel, IMP newImp, IMP *outOrig) {
     NSString *cn = NSStringFromClass([vc class]);
     NSString *t  = vc.title;
     [[WCAIRuntime shared] diagAdd:@"[TAB] %@ | %@", cn, t.length ? t : @"(无标题)"];
-    if ([t isEqualToString:@"我"] || [t isEqualToString:@"Me"] ||
-        [cn rangeOfString:@"Me"].location != NSNotFound) {
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)),
-                       dispatch_get_main_queue(), ^{
-            if (gPromptedMe) return;
-            gPromptedMe = YES;
-            NSString *dump = [self dumpTableIn:vc];
-            [self showDiagAlert:[NSString stringWithFormat:@"「我」页面结构：\n%@", dump]];
-        });
-    }
+    // 只记录，不弹窗（入口已改走悬浮球）
 }
 
 - (void)installSettingsEntry {
@@ -654,6 +641,87 @@ static BOOL WCAIHookMethod(Class c, SEL sel, IMP newImp, IMP *outOrig) {
     else if ([vc isKindOfClass:[UITabBarController class]])
         vc = [(UITabBarController *)vc selectedViewController];
     return vc;
+}
+
+#pragma mark - 悬浮球（独立 UIWindow）
+
+static const NSInteger kWCAIBallTag = 0x5743414A;
+
+- (void)installFloatBall {
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        WCAIOnMain(^{ [self createBallWindow]; });
+    });
+}
+
+- (void)createBallWindow {
+    @try {
+        if (self.ballWindow) { self.ballWindow.hidden = NO; return; }
+
+        CGRect f = CGRectMake(14, 170, 52, 52);
+        UIWindow *win = nil;
+        // iOS 13+ 必须挂到 windowScene，否则窗口不会显示
+        if (@available(iOS 13.0, *)) {
+            UIWindowScene *scene = nil;
+            for (UIScene *s in UIApplication.sharedApplication.connectedScenes) {
+                if (![s isKindOfClass:[UIWindowScene class]]) continue;
+                if (s.activationState != UISceneActivationStateForegroundActive) continue;
+                scene = (UIWindowScene *)s;
+                break;
+            }
+            if (scene) win = [[UIWindow alloc] initWithWindowScene:scene];
+        }
+        if (!win) win = [[UIWindow alloc] initWithFrame:f];
+
+        win.frame = f;
+        win.windowLevel = UIWindowLevelAlert + 1;   // 高于微信自己的视图层，不会被盖住
+        win.backgroundColor = [UIColor clearColor];
+        win.rootViewController = [UIViewController new];
+        win.rootViewController.view.backgroundColor = [UIColor clearColor];
+
+        UIButton *ball = [UIButton buttonWithType:UIButtonTypeCustom];
+        ball.tag = kWCAIBallTag;
+        ball.frame = win.bounds;
+        ball.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+        ball.backgroundColor = [UIColor colorWithWhite:0.10 alpha:0.82];
+        ball.layer.cornerRadius = 26;
+        ball.layer.borderWidth = 1.0;
+        ball.layer.borderColor = [UIColor colorWithWhite:1.0 alpha:0.25].CGColor;
+        ball.titleLabel.font = [UIFont boldSystemFontOfSize:15];
+        [ball setTitle:@"AI" forState:UIControlStateNormal];
+        [ball setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+        [ball addTarget:self action:@selector(onBallTap) forControlEvents:UIControlEventTouchUpInside];
+        [ball addGestureRecognizer:[[UIPanGestureRecognizer alloc]
+                                    initWithTarget:self action:@selector(onBallPan:)]];
+        [win.rootViewController.view addSubview:ball];
+
+        win.hidden = NO;
+        self.ballWindow = win;
+        WCAITrace(@"hook", @"悬浮球窗口已创建");
+        [[WCAIRuntime shared] diagAdd:@"[OK] 悬浮球窗口 level=%.0f", win.windowLevel];
+    } @catch (__unused NSException *e) {}
+}
+
+- (void)onBallTap {
+    WCAITrace(@"ui", @"球被点击");
+    [self openSettings];
+}
+
+- (void)onBallPan:(UIPanGestureRecognizer *)g {
+    UIWindow *win = self.ballWindow;
+    if (!win) return;
+    CGPoint t = [g translationInView:nil];
+    CGRect f = win.frame;
+    f.origin.x += t.x;
+    f.origin.y += t.y;
+    UIScreen *sc = win.screen ?: [UIScreen mainScreen];
+    // 窗口只有球那么大，拖到哪都不会挡住别处的触摸
+    CGFloat maxX = sc.bounds.size.width  - f.size.width;
+    CGFloat maxY = sc.bounds.size.height - f.size.height;
+    f.origin.x = MAX(0,    MIN(f.origin.x, maxX));
+    f.origin.y = MAX(24.0, MIN(f.origin.y, maxY));
+    win.frame = f;
+    [g setTranslation:CGPointZero inView:nil];
 }
 
 - (void)openSettings {

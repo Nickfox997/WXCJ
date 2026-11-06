@@ -17,6 +17,9 @@
 /// 挂设置页入口（hook 数据源，在「关于微信」上方插入原生 Cell）
 - (void)installSettingsEntry;
 
+/// 悬浮球入口（独立 UIWindow，windowLevel 高于微信视图，点击不被遮挡）
+- (void)installFloatBall;
+
 /// 用户确认后发送（手动模式唯一发出口）
 - (void)sendText:(NSString *)text toWxid:(NSString *)wxid;
 
