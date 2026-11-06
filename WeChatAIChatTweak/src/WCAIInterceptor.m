@@ -41,8 +41,9 @@ static long long WCAIGetLL(id obj, NSArray<NSString *> *keys) {
 @interface WCAIInterceptor ()
 - (void)ingestHistoryArray:(NSArray *)arr;
 - (BOOL)text:(NSString *)text hitWords:(NSString *)words;
-- (void)attachEntryButton:(id)vc;
-- (void)installFloatBall;
+- (UITableViewCell *)aiEntryCellForTable:(UITableView *)tv;
+- (UIWindow *)mainWindow;
+- (UIViewController *)topVCFrom:(UIViewController *)vc;
 - (void)openSettings;
 - (void)notify:(NSString *)msg;
 @end
@@ -346,14 +347,44 @@ static long long WCAIGetLL(id obj, NSArray<NSString *> *keys) {
     if (added) WCAITrace(@"preheat", @"预热补入 %ld 条历史", (long)added);
 }
 
-#pragma mark - 设置入口（微信内自建，不改微信数据源）
+#pragma mark - 设置页原生入口（hook 数据源，遵循微信列表渲染逻辑）
 
-// 已 hook 过的类，避免重复安装（本方法会被多次调用做重试）
 static NSMutableSet<NSString *> *g_hookedSettingCls = nil;
 
-/// VC 嗅探：微信 UI 类是【懒加载】的，启动 2s 时设置页类很可能还没注册，
-/// objc_getClass 返回 nil 就直接 miss 了。这是之前入口不出现的真正原因之一。
-/// 这里 hook 导航 push：①把真实类名+标题记进诊断 ②用「标题」而非「类名」挂入口，绕开类名不确定性。
+// 插入点：微信设置页里「关于微信」所在位置（运行时探测，不猜 section 序号）
+static NSInteger gInsSection = -1;
+static NSInteger gInsRow     = -1;
+static BOOL      gProbed     = NO;
+static BOOL      gReloading  = NO;
+
+static BOOL WCAIIsOurRow(NSInteger s, NSInteger r) {
+    return (gProbed && s == gInsSection && r == gInsRow);
+}
+
+/// 界面 index 映射回微信自己的 index（插了一行，后面的都要减一）
+static NSIndexPath *WCAIOrigIndexPath(NSIndexPath *ip) {
+    if (!gProbed || ip.section != gInsSection) return ip;
+    if (ip.row <= gInsRow) return ip;
+    return [NSIndexPath indexPathForRow:(ip.row - 1) inSection:ip.section];
+}
+
+/// 安全 hook：方法若继承自父类，先在子类里补一份再改，
+/// 否则 method_setImplementation 会改到父类，波及所有子类。
+static BOOL WCAIHookMethod(Class c, SEL sel, IMP newImp, IMP *outOrig) {
+    Method m = class_getInstanceMethod(c, sel);
+    if (!m) return NO;
+    IMP orig = method_getImplementation(m);
+    if (class_addMethod(c, sel, orig, method_getTypeEncoding(m))) {
+        m = class_getInstanceMethod(c, sel);
+        if (!m) return NO;
+    }
+    if (outOrig) *outOrig = orig;
+    method_setImplementation(m, newImp);
+    return YES;
+}
+
+/// VC 嗅探：微信 UI 类懒加载，启动 2s 时设置页类可能还没注册。
+/// 记录真实类名+标题，并在看到设置页时触发一次重试。
 - (void)installVCProbe {
     static dispatch_once_t once;
     dispatch_once(&once, ^{
@@ -369,12 +400,11 @@ static NSMutableSet<NSString *> *g_hookedSettingCls = nil;
                 NSString *cn = NSStringFromClass([vc class]);
                 NSString *t  = vc.title;
                 [[WCAIRuntime shared] diagAdd:@"[VC] %@ | %@", cn, t.length ? t : @"(无标题)"];
-                // 标题匹配：不依赖类名
-                if ([t isEqualToString:@"设置"] || [t isEqualToString:@"Settings"] ||
-                    [t isEqualToString:@"我"]   || [t isEqualToString:@"Me"]) {
+                if ([cn isEqualToString:@"WXSettingViewController"] ||
+                    [t isEqualToString:@"设置"] || [t isEqualToString:@"Settings"]) {
                     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.25 * NSEC_PER_SEC)),
                                    dispatch_get_main_queue(), ^{
-                        [[WCAIInterceptor shared] attachEntryButton:vc];
+                        [[WCAIInterceptor shared] installSettingsEntry];
                     });
                 }
             } @catch (__unused NSException *e) {}
@@ -393,132 +423,151 @@ static NSMutableSet<NSString *> *g_hookedSettingCls = nil;
         if ([g_hookedSettingCls containsObject:cn]) { any = YES; continue; }
         Class c = objc_getClass(cn.UTF8String);
         if (!c) continue;
-        SEL s = NSSelectorFromString(@"viewWillAppear:");
-        Method m = class_getInstanceMethod(c, s);
-        if (!m) continue;
 
-        typedef void (*AppearIMP)(id, SEL, BOOL);
-        // 每个类各存各的 IMP：原来用 static 变量在循环里会被后一个类覆盖
-        AppearIMP orig = (AppearIMP)method_getImplementation(m);
-        IMP newImp = imp_implementationWithBlock(^(id self_, BOOL animated) {
-            if (orig) orig(self_, s, animated);
-            @try { [[WCAIInterceptor shared] attachEntryButton:self_]; }
-            @catch (__unused NSException *e) {}
-        });
-        method_setImplementation(m, newImp);
+        // ① 行数：插入点所在 section 多一行
+        SEL s1 = @selector(tableView:numberOfRowsInSection:);
+        __block IMP o1 = NULL;
+        BOOL h1 = WCAIHookMethod(c, s1,
+            imp_implementationWithBlock(^NSInteger(id self_, UITableView *tv, NSInteger section) {
+                typedef NSInteger (*F)(id, SEL, UITableView *, NSInteger);
+                NSInteger n = o1 ? ((F)o1)(self_, s1, tv, section) : 0;
+                if (gProbed && section == gInsSection) return n + 1;
+                return n;
+            }), &o1);
+
+        // ② cell：插入点返回我们的 cell，其余映射回原始 index
+        SEL s2 = @selector(tableView:cellForRowAtIndexPath:);
+        __block IMP o2 = NULL;
+        BOOL h2 = WCAIHookMethod(c, s2,
+            imp_implementationWithBlock(^UITableViewCell *(id self_, UITableView *tv, NSIndexPath *ip) {
+                typedef UITableViewCell *(*F)(id, SEL, UITableView *, NSIndexPath *);
+                if (WCAIIsOurRow(ip.section, ip.row))
+                    return [[WCAIInterceptor shared] aiEntryCellForTable:tv];
+                NSIndexPath *o = WCAIOrigIndexPath(ip);
+                return o2 ? ((F)o2)(self_, s2, tv, o) : nil;
+            }), &o2);
+
+        // ③ 点击：我们的行打开面板，其余透传（index 要映射回去）
+        SEL s3 = @selector(tableView:didSelectRowAtIndexPath:);
+        __block IMP o3 = NULL;
+        BOOL h3 = WCAIHookMethod(c, s3,
+            imp_implementationWithBlock(^(id self_, UITableView *tv, NSIndexPath *ip) {
+                typedef void (*F)(id, SEL, UITableView *, NSIndexPath *);
+                if (WCAIIsOurRow(ip.section, ip.row)) {
+                    [tv deselectRowAtIndexPath:ip animated:YES];
+                    [[WCAIInterceptor shared] openSettings];
+                    return;
+                }
+                if (o3) ((F)o3)(self_, s3, tv, WCAIOrigIndexPath(ip));
+            }), &o3);
+
+        // ④ 显示时探测「关于微信」真实位置，然后 reload 让插入生效
+        SEL s4 = @selector(tableView:willDisplayCell:forRowAtIndexPath:);
+        __block IMP o4 = NULL;
+        BOOL h4 = WCAIHookMethod(c, s4,
+            imp_implementationWithBlock(^(id self_, UITableView *tv, UITableViewCell *cell, NSIndexPath *ip) {
+                typedef void (*F)(id, SEL, UITableView *, UITableViewCell *, NSIndexPath *);
+                if (o4) ((F)o4)(self_, s4, tv, cell, ip);
+                if (gProbed) return;
+                @try {
+                    NSString *t = cell.textLabel.text;
+                    if (t.length && [t containsString:@"关于微信"]) {
+                        gInsSection = ip.section;
+                        gInsRow     = ip.row;
+                        gProbed     = YES;
+                        [[WCAIRuntime shared] diagAdd:@"[OK] 设置页插入点 section=%ld row=%ld",
+                            (long)ip.section, (long)ip.row];
+                        if (!gReloading) {
+                            gReloading = YES;
+                            dispatch_async(dispatch_get_main_queue(), ^{
+                                gReloading = NO;
+                                [tv reloadData];
+                            });
+                        }
+                    }
+                } @catch (__unused NSException *e) {}
+            }), &o4);
+
+        if (!(h1 && h2)) continue;    // 数据源没挂上，换下一个候选类
         [g_hookedSettingCls addObject:cn];
         any = YES;
-        WCAITrace(@"hook", @"设置入口命中 %s", class_getName(c));
-        [[WCAIRuntime shared] diagAdd:@"[OK] 设置入口 %s", class_getName(c)];
+        WCAITrace(@"hook", @"设置页数据源挂载 %s rows:%d cell:%d select:%d display:%d",
+                  class_getName(c), h1, h2, h3, h4);
+        [[WCAIRuntime shared] diagAdd:@"[OK] 设置页 %s rows:%d cell:%d select:%d display:%d",
+            class_getName(c), h1, h2, h3, h4];
     }
 
     if (!any) {
         WCAITrace(@"hook", @"设置页类尚未加载（懒加载），等待重试");
         [[WCAIRuntime shared] diagAdd:@"[..] 设置页类未加载，等待重试"];
     }
-    [self installFloatBall];   // 球先保留：主入口未就绪时它是唯一入口
 }
 
-- (void)attachEntryButton:(id)vc {
-    if (![vc isKindOfClass:[UIViewController class]]) return;
-    UIViewController *v = (UIViewController *)vc;
-    UIView *root = v.view;
-    if (!root) return;
-    if ([root viewWithTag:0x57434149]) return;   // 已加过
+/// 原生样式的「AI 助手」cell：自适配深色模式，右侧 disclosure 箭头
+- (UITableViewCell *)aiEntryCellForTable:(UITableView *)tv {
+    static NSString *cid = @"wcai.entry.native";
+    UITableViewCell *cell = [tv dequeueReusableCellWithIdentifier:cid];
+    if (cell) return cell;
 
-    UIButton *btn = [UIButton buttonWithType:UIButtonTypeSystem];
-    btn.tag = 0x57434149;
-    btn.frame = CGRectMake(root.bounds.size.width - 76, root.bounds.size.height - 96, 60, 34);
-    btn.autoresizingMask = UIViewAutoresizingFlexibleLeftMargin | UIViewAutoresizingFlexibleTopMargin;
-    [btn setTitle:@"AI" forState:UIControlStateNormal];
-    btn.titleLabel.font = [UIFont boldSystemFontOfSize:15];
-    btn.backgroundColor = [UIColor colorWithWhite:0.2 alpha:0.85];
-    [btn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
-    btn.layer.cornerRadius = 17;
-    [btn addTarget:self action:@selector(openSettings) forControlEvents:UIControlEventTouchUpInside];
-    [root addSubview:btn];
+    cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:cid];
+    cell.textLabel.text = @"AI 助手";
+    cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+    cell.textLabel.font = [UIFont systemFontOfSize:17];
+
+    if (@available(iOS 13.0, *)) {
+        UIImageSymbolConfiguration *conf =
+            [UIImageSymbolConfiguration configurationWithPointSize:19
+                                                            weight:UIImageSymbolWeightMedium];
+        UIImage *img = [UIImage systemImageNamed:@"lightbulb.fill" withConfiguration:conf];
+        cell.imageView.image = [img imageWithTintColor:[UIColor systemOrangeColor]
+                                         renderingMode:UIImageRenderingModeAlwaysOriginal];
+        cell.backgroundColor = [UIColor secondarySystemGroupedBackgroundColor];
+        cell.textLabel.textColor = [UIColor labelColor];
+    } else {
+        cell.backgroundColor = [UIColor whiteColor];
+        cell.textLabel.textColor = [UIColor blackColor];
+    }
+    return cell;
+}
+
+- (UIWindow *)mainWindow {
+    @try {
+        UIWindow *kw = nil;
+        if (@available(iOS 13.0, *)) {
+            for (UIScene *sc in UIApplication.sharedApplication.connectedScenes) {
+                if (![sc isKindOfClass:[UIWindowScene class]]) continue;
+                for (UIWindow *w in ((UIWindowScene *)sc).windows) {
+                    if (w.isKeyWindow) { kw = w; break; }
+                }
+                if (kw) break;
+            }
+        }
+        if (!kw) kw = UIApplication.sharedApplication.keyWindow;
+        if (!kw) kw = UIApplication.sharedApplication.windows.firstObject;
+        return kw;
+    } @catch (__unused NSException *e) { return nil; }
+}
+
+- (UIViewController *)topVCFrom:(UIViewController *)vc {
+    while (vc.presentedViewController) vc = vc.presentedViewController;
+    if ([vc isKindOfClass:[UINavigationController class]])
+        vc = [(UINavigationController *)vc topViewController];
+    else if ([vc isKindOfClass:[UITabBarController class]])
+        vc = [(UITabBarController *)vc selectedViewController];
+    return vc;
 }
 
 - (void)openSettings {
     WCAIOnMain(^{
-        UIWindow *win = UIApplication.sharedApplication.keyWindow;
-        if (!win) win = UIApplication.sharedApplication.windows.firstObject;
+        UIWindow *win = [self mainWindow];
+        if (!win) return;
+        UIViewController *top = [self topVCFrom:win.rootViewController];
+        if (!top) return;
         UINavigationController *nav = [[UINavigationController alloc]
                                        initWithRootViewController:[WCAISettingsVC new]];
-        [win.rootViewController presentViewController:nav animated:YES completion:nil];
+        nav.modalPresentationStyle = UIModalPresentationFullScreen;
+        [top presentViewController:nav animated:YES completion:nil];
     });
-}
-
-- (void)installFloatBall {
-    // 真兜底：不依赖任何微信类名，直接挂到 keyWindow 上。
-    // 它同时是「dylib 有没有被加载」的可视信号：
-    //   球在 = dylib 加载成功（只是设置页 hook 没命中）
-    //   球不在 = dylib 根本没加载（注入/签名问题，与代码无关）
-    WCAITrace(@"hook", @"启用悬浮球入口");
-    __weak typeof(self) wself = self;
-    WCAIOnMain(^{
-        [wself placeFloatBall];
-        // keyWindow 会随页面切换被替换，定时补挂（球还在时只是提到最上层）
-        [NSTimer scheduledTimerWithTimeInterval:3.0 repeats:YES block:^(NSTimer *tm) {
-            [wself placeFloatBall];
-        }];
-    });
-}
-
-- (UIWindow *)currentKeyWindow {
-    @try {
-        UIWindow *kw = UIApplication.sharedApplication.keyWindow;
-        if (kw) return kw;
-        for (UIWindow *w in UIApplication.sharedApplication.windows) {
-            if (w.isKeyWindow) return w;
-        }
-        return UIApplication.sharedApplication.windows.firstObject;
-    } @catch (__unused NSException *e) { return nil; }
-}
-
-- (void)placeFloatBall {
-    @try {
-        UIWindow *win = [self currentKeyWindow];
-        if (!win) return;
-        UIView *old = [win viewWithTag:0x5743414A];
-        if (old) {
-            if (old.superview != win) [win addSubview:old];
-            [win bringSubviewToFront:old];
-            return;
-        }
-        UIButton *ball = [UIButton buttonWithType:UIButtonTypeCustom];
-        ball.tag = 0x5743414A;
-        ball.frame = CGRectMake(12, 180, 46, 46);
-        ball.backgroundColor = [UIColor colorWithWhite:0.12 alpha:0.80];
-        ball.layer.cornerRadius = 23;
-        ball.layer.borderWidth = 1.0;
-        ball.layer.borderColor = [UIColor colorWithWhite:1.0 alpha:0.28].CGColor;
-        ball.titleLabel.font = [UIFont boldSystemFontOfSize:14];
-        [ball setTitle:@"AI" forState:UIControlStateNormal];
-        [ball setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
-        [ball addTarget:self action:@selector(openSettings)
-       forControlEvents:UIControlEventTouchUpInside];
-        UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc]
-                                        initWithTarget:self action:@selector(dragBall:)];
-        pan.cancelsTouchesInView = NO;   // 不抢掉点击
-        [ball addGestureRecognizer:pan];
-        [win addSubview:ball];
-        WCAITrace(@"hook", @"悬浮球已挂载");
-    } @catch (__unused NSException *e) {}
-}
-
-- (void)dragBall:(UIPanGestureRecognizer *)g {
-    UIView *v = g.view;
-    UIView *sp = v.superview;
-    if (!sp) return;
-    CGPoint p = [g translationInView:sp];
-    CGFloat half = v.bounds.size.width / 2.0;
-    CGFloat nx = v.center.x + p.x;
-    CGFloat ny = v.center.y + p.y;
-    nx = MAX(half + 4, MIN(nx, sp.bounds.size.width  - half - 4));
-    ny = MAX(half + 4, MIN(ny, sp.bounds.size.height - half - 4));
-    v.center = CGPointMake(nx, ny);
-    [g setTranslation:CGPointZero inView:sp];
 }
 
 @end

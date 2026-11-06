@@ -273,10 +273,8 @@ static void wcai_entry(void) {
         BOOL silent = WCAIShouldRunSilently();
         WCAIMarkBootOK();
         if (silent) {
-            // 静默不是「消失」：仍然挂球，让你能确认插件确实被加载了，
-            // 同时能看到「因为上次异常退出所以本次静默」这个状态。
+            // 静默模式不做任何 UI（悬浮球已移除），只留诊断记录
             [[WCAIRuntime shared] diagAdd:@"上次启动异常退出 → 本次静默模式（未装 hook）"];
-            [[WCAIInterceptor shared] installFloatBall];
             return;
         }
 
