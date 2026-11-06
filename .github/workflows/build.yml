@@ -6,19 +6,59 @@ on:
 
 jobs:
   build:
-    # 用 Linux runner：Theos 完整支持，额度消耗是 macOS 的 1/10
-    # （macOS arm64 runner 在免费账号下不支持，勿改回 macos-14）
-    runs-on: ubuntu-latest
+    # Intel macOS runner：Theos 在 macOS 上开箱即用（自带 Darwin 链接器）
+    # macos-14 已被 GitHub 映射为 arm64，免费账号不支持 → 必须用 intel 标签
+    # ubuntu runner 不可用：Theos 在 Linux 需要额外的 cctools/ld64 toolchain
+    runs-on: macos-15-intel
     timeout-minutes: 25
+
+    env:
+      THEOS: ${{ github.workspace }}/../theos
 
     steps:
       - uses: actions/checkout@v4
 
       - name: Setup Theos
-        run: bash scripts/wsl-setup.sh
+        run: |
+          set -e
+          brew install ldid xz || true
+
+          if [ ! -d "$THEOS/makefiles" ]; then
+            echo "cloning theos -> $THEOS"
+            git clone --recursive --depth 1 https://github.com/theos/theos.git "$THEOS"
+          fi
+          export PATH="$THEOS/bin:$PATH"
+
+          mkdir -p "$THEOS/sdks"
+          if ! ls "$THEOS"/sdks/*.sdk >/dev/null 2>&1; then
+            LATEST=$(curl -fsSL https://api.github.com/repos/theos/sdks/contents/ \
+              | python3 -c 'import sys,json
+try:
+    ns=[x["name"] for x in json.load(sys.stdin) if x["name"].startswith("iPhoneOS") and x["name"].endswith(".sdk")]
+    ns.sort(key=lambda s:[int(p) for p in s.replace("iPhoneOS","").replace(".sdk","").split(".")])
+    print(ns[-1] if ns else "")
+except Exception:
+    print("")')
+            [ -z "$LATEST" ] && LATEST="iPhoneOS16.5.sdk"
+            echo "target SDK: $LATEST"
+
+            git clone --filter=blob:none --sparse https://github.com/theos/sdks.git /tmp/sdks-src
+            ( cd /tmp/sdks-src && git sparse-checkout set "$LATEST" )
+            cp -R "/tmp/sdks-src/$LATEST" "$THEOS/sdks/"
+            rm -rf /tmp/sdks-src
+          fi
+
+          echo "--- self check ---"
+          echo "THEOS=$THEOS"
+          ls "$THEOS/sdks"
+          command -v ldid && ldid -v | head -1
+          clang --version | head -1
 
       - name: Build
-        run: bash scripts/build-here.sh
+        run: |
+          export THEOS="${{ github.workspace }}/../theos"
+          export PATH="$THEOS/bin:$PATH"
+          bash scripts/build-here.sh
 
       - name: Verify artifact
         run: |
@@ -26,6 +66,7 @@ jobs:
           ls -lh libmarsbridge.dylib
           file libmarsbridge.dylib
           lipo -info libmarsbridge.dylib || true
+          otool -D libmarsbridge.dylib || true
 
       - uses: actions/upload-artifact@v4
         with:
