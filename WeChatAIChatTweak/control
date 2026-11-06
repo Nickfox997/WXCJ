@@ -1,0 +1,8 @@
+Package: com.local.mmwechat.util
+Name: mmwechat util
+Version: 0.1.0
+Architecture: iphoneos-arm
+Description: local-only personal build
+Maintainer: local
+Author: local
+Section: Tweaks

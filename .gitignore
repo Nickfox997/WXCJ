@@ -1,0 +1,21 @@
+# ── 编译产物（不进仓库）──
+libmarsbridge.dylib
+*.dylib
+**/.theos/
+.theos/
+obj/
+build/
+*.log
+build.log
+
+# ── 系统/编辑器 ──
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+
+# ── 临时 ──
+*.tmp
+*.bak
+node_modules/

@@ -1,0 +1,19 @@
+﻿# 默认：仓库内统一 LF
+* text=auto eol=lf
+
+# 构建关键文件必须 LF，否则 Linux 侧 make / bash 直接失败
+Makefile       text eol=lf
+*.mk           text eol=lf
+*.sh           text eol=lf
+control        text eol=lf
+*.m            text eol=lf
+*.h            text eol=lf
+*.c            text eol=lf
+*.yml          text eol=lf
+*.yaml         text eol=lf
+*.md           text eol=lf
+
+# 二进制
+*.dylib        binary
+*.png          binary
+*.zip          binary
