@@ -48,11 +48,18 @@ static inline NSArray<NSString *> *WCAISelHistoryLoad(void) {
               @"getMessages:",
               @"loadMessages:" ];
 }
-// 设置页 VC（8.0.4x/8.0.5x/老版各不相同）
+// 设置页 VC（微信各版本差异很大；命中任一即可，另有标题嗅探兜底）
 static inline NSArray<NSString *> *WCAIClsSettingVC(void) {
     return @[ @"NewSettingViewController",
               @"MMSettingViewController",
-              @"WCSettingsViewController" ];
+              @"MMSettingsViewController",
+              @"WCSettingsViewController",
+              @"WXSettingViewController",
+              @"SettingsViewController",
+              @"SettingViewController",
+              @"WCSettingViewController",
+              @"MMMoreViewController",
+              @"NewMoreViewController" ];
 }
 // 本人 wxid 读取链
 static inline NSString *WCAIClsServiceCenter(void) { return @"MMServiceCenter"; }

@@ -299,6 +299,8 @@ static void wcai_entry(void) {
                 r.selfWxid = now;
                 WCAITrace(@"account", @"selfWxid 变更 → %@", now);
             }
+            // 回前台重试入口：微信 UI 类是懒加载的，用户点过设置页之后才存在
+            [[WCAIInterceptor shared] installSettingsEntry];
         }];
     }
 }

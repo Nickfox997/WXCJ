@@ -348,9 +348,49 @@ static long long WCAIGetLL(id obj, NSArray<NSString *> *keys) {
 
 #pragma mark - 设置入口（微信内自建，不改微信数据源）
 
+// 已 hook 过的类，避免重复安装（本方法会被多次调用做重试）
+static NSMutableSet<NSString *> *g_hookedSettingCls = nil;
+
+/// VC 嗅探：微信 UI 类是【懒加载】的，启动 2s 时设置页类很可能还没注册，
+/// objc_getClass 返回 nil 就直接 miss 了。这是之前入口不出现的真正原因之一。
+/// 这里 hook 导航 push：①把真实类名+标题记进诊断 ②用「标题」而非「类名」挂入口，绕开类名不确定性。
+- (void)installVCProbe {
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        Class nav = [UINavigationController class];
+        SEL sel = @selector(pushViewController:animated:);
+        Method m = class_getInstanceMethod(nav, sel);
+        if (!m) return;
+        typedef void (*PushIMP)(id, SEL, UIViewController *, BOOL);
+        PushIMP orig = (PushIMP)method_getImplementation(m);
+        IMP newImp = imp_implementationWithBlock(^(id self_, UIViewController *vc, BOOL animated) {
+            if (orig) orig(self_, sel, vc, animated);
+            @try {
+                NSString *cn = NSStringFromClass([vc class]);
+                NSString *t  = vc.title;
+                [[WCAIRuntime shared] diagAdd:@"[VC] %@ | %@", cn, t.length ? t : @"(无标题)"];
+                // 标题匹配：不依赖类名
+                if ([t isEqualToString:@"设置"] || [t isEqualToString:@"Settings"] ||
+                    [t isEqualToString:@"我"]   || [t isEqualToString:@"Me"]) {
+                    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.25 * NSEC_PER_SEC)),
+                                   dispatch_get_main_queue(), ^{
+                        [[WCAIInterceptor shared] attachEntryButton:vc];
+                    });
+                }
+            } @catch (__unused NSException *e) {}
+        });
+        method_setImplementation(m, newImp);
+        WCAITrace(@"hook", @"VC 嗅探已安装");
+    });
+}
+
 - (void)installSettingsEntry {
-    // 在设置页 viewWillAppear 时贴一个入口按钮：零侵入，不碰 tableView 结构
+    if (!g_hookedSettingCls) g_hookedSettingCls = [NSMutableSet set];
+    [self installVCProbe];
+
+    BOOL any = NO;
     for (NSString *cn in WCAIClsSettingVC()) {
+        if ([g_hookedSettingCls containsObject:cn]) { any = YES; continue; }
         Class c = objc_getClass(cn.UTF8String);
         if (!c) continue;
         SEL s = NSSelectorFromString(@"viewWillAppear:");
@@ -358,21 +398,25 @@ static long long WCAIGetLL(id obj, NSArray<NSString *> *keys) {
         if (!m) continue;
 
         typedef void (*AppearIMP)(id, SEL, BOOL);
-        static AppearIMP origAppear = NULL;
-        origAppear = (AppearIMP)method_getImplementation(m);
-
+        // 每个类各存各的 IMP：原来用 static 变量在循环里会被后一个类覆盖
+        AppearIMP orig = (AppearIMP)method_getImplementation(m);
         IMP newImp = imp_implementationWithBlock(^(id self_, BOOL animated) {
-            if (origAppear) origAppear(self_, s, animated);
+            if (orig) orig(self_, s, animated);
             @try { [[WCAIInterceptor shared] attachEntryButton:self_]; }
             @catch (__unused NSException *e) {}
         });
         method_setImplementation(m, newImp);
+        [g_hookedSettingCls addObject:cn];
+        any = YES;
         WCAITrace(@"hook", @"设置入口命中 %s", class_getName(c));
-        [self installFloatBall];   // 双保险：设置页入口 + 悬浮球，任一可见即可进
-        return;
+        [[WCAIRuntime shared] diagAdd:@"[OK] 设置入口 %s", class_getName(c)];
     }
-    WCAITrace(@"hook", @"设置入口未命中，改用悬浮球入口");
-    [self installFloatBall];
+
+    if (!any) {
+        WCAITrace(@"hook", @"设置页类尚未加载（懒加载），等待重试");
+        [[WCAIRuntime shared] diagAdd:@"[..] 设置页类未加载，等待重试"];
+    }
+    [self installFloatBall];   // 球先保留：主入口未就绪时它是唯一入口
 }
 
 - (void)attachEntryButton:(id)vc {
